@@ -44,9 +44,13 @@ jobs:
 
       - name: Setup zig (cross linker for all musl targets)
         uses: goto-bus-stop/setup-zig@v2
+        with:
+          # 固定 0.13.0：cargo-zigbuild 0.23 与 zig 0.14+/master 的
+          # mipsel target 解析不兼容（unable to provide libc）
+          version: 0.13.0
 
       - name: Install cargo-zigbuild
-        run: python3 -m pip install cargo-zigbuild
+        run: python3 -m pip install "cargo-zigbuild==0.23.0"
 
       - name: Build (release, static musl via zig)
         run: |
