@@ -1,3 +1,5 @@
-# 编译产物输出到 D 盘（C 盘空间保护）
+# 编译产物输出到 D 盘（C 盘空间保护）。
+# 注意：仅本机（Windows）适用；CI 里用 CARGO_TARGET_DIR=/work/target 覆盖
+# 此配置（D:/ 路径含冒号，Linux 容器内 cargo 拼 LD_LIBRARY_PATH 会报错）。
 [build]
 target-dir = "D:/rust/targets/lw-worker"

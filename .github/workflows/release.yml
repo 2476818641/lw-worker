@@ -41,13 +41,15 @@ jobs:
       # mipsel-unknown-linux-musl 的预编译 rust-std 只在 1.74 提供。
       # 用 messense/rust-musl-cross 镜像（内置完整 musl 交叉工具链），
       # 镜像内 rustup 安装 1.74 后编译——避开 zig 与 rustc 1.74 的 crt/gcc_s 冲突。
+      # CARGO_TARGET_DIR 覆盖 .cargo/config.toml 的 Windows 本机 target-dir
+      # （D:/rust/... 路径含冒号，Linux 容器内 join LD_LIBRARY_PATH 会报错）。
       - name: Build (docker musl-cross + Rust 1.74)
         run: |
           docker run --rm -v "$PWD:/work" -w /work \
             messense/rust-musl-cross:${{ matrix.image_tag }} \
-            bash -c "rustup toolchain install 1.74.0 --profile minimal --target ${{ matrix.target }} \
+            bash -c "export CARGO_TARGET_DIR=/work/target && rustup toolchain install 1.74.0 --profile minimal --target ${{ matrix.target }} \
               && cargo +1.74.0 build --release --target ${{ matrix.target }} \
-              && cp target/${{ matrix.target }}/release/blackout-lw /work/${{ matrix.asset }}"
+              && cp /work/target/${{ matrix.target }}/release/blackout-lw /work/${{ matrix.asset }}"
 
       - name: Inspect artifact
         run: |
