@@ -160,19 +160,19 @@ fn run_task(cfg: &Config, node_id: &str, task: &TaskMsg, stats: &std::sync::Arc<
     );
     run_dns_reflection(&spec, std::sync::Arc::clone(stats));
     report(cfg, node_id, stats)?;
-    eprintln!("blackout-lw: task {} done (pkts={})", task.task_id, stats.packets.load(std::sync::atomic::Ordering::Relaxed));
+    eprintln!("blackout-lw: task {} done (pkts={})", task.task_id, stats.packets());
     Ok(())
 }
 
-fn report(cfg: &Config, node_id: &str, stats: &Stats) -> Result<(), HError> {    use std::sync::atomic::Ordering;
+fn report(cfg: &Config, node_id: &str, stats: &Stats) -> Result<(), HError> {
     let body = format!(
         r#"{{"token":"{}","node_id":"{}","packets":{},"bytes":{},"errors":{},"pps":{}}}"#,
         cfg.token,
         node_id,
-        stats.packets.load(Ordering::Relaxed),
-        stats.bytes.load(Ordering::Relaxed),
-        stats.errors.load(Ordering::Relaxed),
-        stats.pps.load(Ordering::Relaxed),
+        stats.packets(),
+        stats.bytes(),
+        stats.errors(),
+        stats.pps(),
     );
     let resp = http::post_json(&cfg.controller, "/api/lw/report", &cfg.token, &body, Duration::from_secs(10))?;
     if resp.status != 200 {

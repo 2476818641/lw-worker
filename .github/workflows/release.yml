@@ -1,0 +1,98 @@
+name: Release Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (required for manual trigger)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            asset: lw-worker-x86_64
+          - target: armv7-unknown-linux-musleabihf
+            asset: lw-worker-armv7
+          - target: aarch64-unknown-linux-musl
+            asset: lw-worker-aarch64
+          - target: mipsel-unknown-linux-musl
+            asset: lw-worker-mipsel
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # mipsel-unknown-linux-musl 的预编译 rust-std 只在 1.74 提供，
+      # 全部平台统一用 1.74 保证行为一致（依赖版本已 pin 兼容）
+      - name: Install Rust 1.74
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.74.0
+          targets: ${{ matrix.target }}
+
+      - name: Install musl linkers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          # 交叉链接器：musl.cc 预编译工具链（x86_64 用 apt 的 musl-gcc 即可）
+          curl -sL https://musl.cc/aarch64-linux-musl-cross.tgz | sudo tar xz -C /opt
+          curl -sL https://musl.cc/armv7-linux-musleabihf-cross.tgz | sudo tar xz -C /opt
+          curl -sL https://musl.cc/mipsel-linux-musl-cross.tgz | sudo tar xz -C /opt
+          echo "/opt/aarch64-linux-musl-cross/bin:/opt/armv7-linux-musleabihf-cross/bin:/opt/mipsel-linux-musl-cross/bin" >> $GITHUB_PATH
+
+      - name: Build (release, static musl)
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER: armv7-linux-musleabihf-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-musl-gcc
+          CARGO_TARGET_MIPSEL_UNKNOWN_LINUX_MUSL_LINKER: mipsel-linux-musl-gcc
+        run: |
+          cargo build --release --target ${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/blackout-lw ${{ matrix.asset }}
+          ls -lh ${{ matrix.asset }}
+          file ${{ matrix.asset }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: dist/*

