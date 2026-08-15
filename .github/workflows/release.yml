@@ -24,12 +24,20 @@ jobs:
         include:
           - target: x86_64-unknown-linux-musl
             asset: lw-worker-x86_64
+            zig_target: x86_64-linux-musl
+            linker_env: CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER
           - target: armv7-unknown-linux-musleabihf
             asset: lw-worker-armv7
+            zig_target: arm-linux-musleabihf
+            linker_env: CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER
           - target: aarch64-unknown-linux-musl
             asset: lw-worker-aarch64
+            zig_target: aarch64-linux-musl
+            linker_env: CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER
           - target: mipsel-unknown-linux-musl
             asset: lw-worker-mipsel
+            zig_target: mipsel-linux-musl
+            linker_env: CARGO_TARGET_MIPSEL_UNKNOWN_LINUX_MUSL_LINKER
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -45,16 +53,22 @@ jobs:
       - name: Setup zig (cross linker for all musl targets)
         uses: goto-bus-stop/setup-zig@v2
         with:
-          # 固定 0.13.0：cargo-zigbuild 0.23 与 zig 0.14+/master 的
-          # mipsel target 解析不兼容（unable to provide libc）
+          # 固定 0.13.0：cargo-zigbuild 与新版 zig 对 mipsel target 解析不兼容
           version: 0.13.0
 
-      - name: Install cargo-zigbuild
-        run: python3 -m pip install "cargo-zigbuild==0.23.0"
-
+      # 直接以 zig cc 作为链接器（wrapper 指定 target），
+      # 绕开 cargo-zigbuild 对 mipsel 的 target 转换 bug
       - name: Build (release, static musl via zig)
+        env:
+          ZIG_TARGET: ${{ matrix.zig_target }}
         run: |
-          cargo zigbuild --release --target ${{ matrix.target }}
+          cat > /tmp/zigcc.sh <<'EOF'
+          #!/bin/sh
+          exec zig cc -target "$ZIG_TARGET" -O0 "$@"
+          EOF
+          chmod +x /tmp/zigcc.sh
+          export ${{ matrix.linker_env }}=/tmp/zigcc.sh
+          cargo build --release --target ${{ matrix.target }}
           cp target/${{ matrix.target }}/release/blackout-lw ${{ matrix.asset }}
           ls -lh ${{ matrix.asset }}
           file ${{ matrix.asset }}
