@@ -42,24 +42,15 @@ jobs:
           toolchain: 1.74.0
           targets: ${{ matrix.target }}
 
-      - name: Install musl linkers
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools
-          # 交叉链接器：musl.cc 预编译工具链（x86_64 用 apt 的 musl-gcc 即可）
-          curl -sL https://musl.cc/aarch64-linux-musl-cross.tgz | sudo tar xz -C /opt
-          curl -sL https://musl.cc/armv7-linux-musleabihf-cross.tgz | sudo tar xz -C /opt
-          curl -sL https://musl.cc/mipsel-linux-musl-cross.tgz | sudo tar xz -C /opt
-          echo "/opt/aarch64-linux-musl-cross/bin:/opt/armv7-linux-musleabihf-cross/bin:/opt/mipsel-linux-musl-cross/bin" >> $GITHUB_PATH
+      - name: Setup zig (cross linker for all musl targets)
+        uses: goto-bus-stop/setup-zig@v2
 
-      - name: Build (release, static musl)
-        env:
-          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
-          CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER: armv7-linux-musleabihf-gcc
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-musl-gcc
-          CARGO_TARGET_MIPSEL_UNKNOWN_LINUX_MUSL_LINKER: mipsel-linux-musl-gcc
+      - name: Install cargo-zigbuild
+        run: python3 -m pip install cargo-zigbuild
+
+      - name: Build (release, static musl via zig)
         run: |
-          cargo build --release --target ${{ matrix.target }}
+          cargo zigbuild --release --target ${{ matrix.target }}
           cp target/${{ matrix.target }}/release/blackout-lw ${{ matrix.asset }}
           ls -lh ${{ matrix.asset }}
           file ${{ matrix.asset }}
