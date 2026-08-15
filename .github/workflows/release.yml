@@ -24,52 +24,33 @@ jobs:
         include:
           - target: x86_64-unknown-linux-musl
             asset: lw-worker-x86_64
-            zig_target: x86_64-linux-musl
-            linker_env: CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER
+            image_tag: x86_64-musl
           - target: armv7-unknown-linux-musleabihf
             asset: lw-worker-armv7
-            zig_target: arm-linux-musleabihf
-            linker_env: CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER
+            image_tag: armv7-musleabihf
           - target: aarch64-unknown-linux-musl
             asset: lw-worker-aarch64
-            zig_target: aarch64-linux-musl
-            linker_env: CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER
+            image_tag: aarch64-musl
           - target: mipsel-unknown-linux-musl
             asset: lw-worker-mipsel
-            zig_target: mipsel-linux-musl
-            linker_env: CARGO_TARGET_MIPSEL_UNKNOWN_LINUX_MUSL_LINKER
+            image_tag: mipsel-musl
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # mipsel-unknown-linux-musl 的预编译 rust-std 只在 1.74 提供，
-      # 全部平台统一用 1.74 保证行为一致（依赖版本已 pin 兼容）
-      - name: Install Rust 1.74
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.74.0
-          targets: ${{ matrix.target }}
-
-      - name: Setup zig (cross linker for all musl targets)
-        uses: goto-bus-stop/setup-zig@v2
-        with:
-          # 固定 0.13.0：cargo-zigbuild 与新版 zig 对 mipsel target 解析不兼容
-          version: 0.13.0
-
-      # 直接以 zig cc 作为链接器（wrapper 指定 target），
-      # 绕开 cargo-zigbuild 对 mipsel 的 target 转换 bug
-      - name: Build (release, static musl via zig)
-        env:
-          ZIG_TARGET: ${{ matrix.zig_target }}
+      # mipsel-unknown-linux-musl 的预编译 rust-std 只在 1.74 提供。
+      # 用 messense/rust-musl-cross 镜像（内置完整 musl 交叉工具链），
+      # 镜像内 rustup 安装 1.74 后编译——避开 zig 与 rustc 1.74 的 crt/gcc_s 冲突。
+      - name: Build (docker musl-cross + Rust 1.74)
         run: |
-          cat > /tmp/zigcc.sh <<'EOF'
-          #!/bin/sh
-          exec zig cc -target "$ZIG_TARGET" -O0 "$@"
-          EOF
-          chmod +x /tmp/zigcc.sh
-          export ${{ matrix.linker_env }}=/tmp/zigcc.sh
-          cargo build --release --target ${{ matrix.target }}
-          cp target/${{ matrix.target }}/release/blackout-lw ${{ matrix.asset }}
+          docker run --rm -v "$PWD:/work" -w /work \
+            messense/rust-musl-cross:${{ matrix.image_tag }} \
+            bash -c "rustup toolchain install 1.74.0 --profile minimal --target ${{ matrix.target }} \
+              && cargo +1.74.0 build --release --target ${{ matrix.target }} \
+              && cp target/${{ matrix.target }}/release/blackout-lw /work/${{ matrix.asset }}"
+
+      - name: Inspect artifact
+        run: |
           ls -lh ${{ matrix.asset }}
           file ${{ matrix.asset }}
 
