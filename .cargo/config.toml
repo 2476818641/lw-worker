@@ -1,0 +1,3 @@
+# 编译产物输出到 D 盘（C 盘空间保护）
+[build]
+target-dir = "D:/rust/targets/lw-worker"
