@@ -50,35 +50,56 @@ struct HeartbeatReq<'a> {
 }
 
 pub fn run(cfg: &Config) -> Result<(), HError> {
-    let node_id = register(cfg)?;
+    // 注册失败（网络/控制器未起）时重试而非退出：节点会因一次抖动永久消失，
+    // 而路由器上通常没有 supervisor 拉起进程。仅 token 被拒才退出。
+    let mut node_id = register_with_retry(cfg)?;
     eprintln!("blackout-lw: registered as {node_id}");
 
     let stats = std::sync::Arc::new(Stats::default());
 
     loop {
-        // 心跳（= 任务轮询）
-        let hb_json = serde_json::to_string(&HeartbeatReq { token: &cfg.token, node_id: &node_id })
-            .map_err(|e| HError(e.to_string()))?;
-        let resp = http::post_json(
+        // 心跳（= 任务轮询）——所有网络/解析错误都退避重试，绝不退进程
+        let hb_json = match serde_json::to_string(&HeartbeatReq { token: &cfg.token, node_id: &node_id }) {
+            Ok(j) => j,
+            Err(e) => {
+                eprintln!("blackout-lw: heartbeat encode error: {e}");
+                std::thread::sleep(Duration::from_secs(5));
+                continue;
+            }
+        };
+        let resp = match http::post_json(
             &cfg.controller,
             "/api/lw/heartbeat",
             &cfg.token,
             &hb_json,
             Duration::from_secs(10),
-        )?;
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("blackout-lw: heartbeat error: {e} (retry in 5s)");
+                std::thread::sleep(Duration::from_secs(5));
+                continue;
+            }
+        };
 
         if resp.status == 401 || resp.status == 403 {
             return Err(HError("controller rejected token (401/403)".into()));
         }
         if resp.status != 200 {
-            // 控制器不可用：退避重试
+            // 控制器不可用（含 unknown node）：退避重试
             eprintln!("blackout-lw: heartbeat http {}", resp.status);
             std::thread::sleep(Duration::from_secs(5));
             continue;
         }
 
-        let hb: HeartbeatResp = serde_json::from_str(&resp.body)
-            .map_err(|e| HError(format!("heartbeat parse: {e} body={}", resp.body)))?;
+        let hb: HeartbeatResp = match serde_json::from_str(&resp.body) {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("blackout-lw: heartbeat parse error: {e} (retry in 5s)");
+                std::thread::sleep(Duration::from_secs(5));
+                continue;
+            }
+        };
 
         if hb.kick {
             eprintln!("blackout-lw: KICKED by controller, exiting (self-remove optional)");
@@ -94,6 +115,24 @@ pub fn run(cfg: &Config) -> Result<(), HError> {
         }
 
         std::thread::sleep(Duration::from_secs(cfg.heartbeat_secs));
+    }
+}
+
+/// register_with_retry 注册：网络/控制器未就绪时每 5s 重试，永不因临时故障退出；
+/// 仅当控制器明确拒绝 token（401/403）时才返回错误终止进程。
+fn register_with_retry(cfg: &Config) -> Result<String, HError> {
+    loop {
+        match register(cfg) {
+            Ok(id) => return Ok(id),
+            Err(e) => {
+                let msg = e.0.clone();
+                if msg.contains("401") || msg.contains("403") {
+                    return Err(e);
+                }
+                eprintln!("blackout-lw: register failed: {msg} (retry in 5s)");
+                std::thread::sleep(Duration::from_secs(5));
+            }
+        }
     }
 }
 

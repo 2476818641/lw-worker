@@ -1,5 +1,7 @@
 // 迷你 HTTP/1.1 客户端（零依赖，仅明文 http——直连 Controller 源站）。
-// 目标体积：不做 TLS/重定向/分块等；响应体一次读入内存。
+// 支持 Content-Length 与 Transfer-Encoding: chunked（Controller 的
+// json.Encoder 在响应超过 2KB 缓冲阈值时自动转 chunked——反射器池
+// 列表必然超过，不支持 chunked 会导致池永远拉取失败、攻击空转）。
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -94,24 +96,63 @@ fn parse_response(buf: &[u8]) -> Result<Response, HttpError> {
         .and_then(|s| s.parse().ok())
         .ok_or(HttpError(format!("bad status line: {status_line}")))?;
 
-    // Content-Length 解析（无则读到 EOF 已包含全部）
+    // Content-Length / Transfer-Encoding 解析
     let mut content_length: Option<usize> = None;
+    let mut chunked = false;
     for line in lines {
         let lower = line.to_ascii_lowercase();
         if let Some(v) = lower.strip_prefix("content-length:") {
             content_length = v.trim().parse().ok();
         }
-    }
-    let body = &buf[head_end + 4..];
-    let body = match content_length {
-        Some(n) => {
-            let end = n.min(body.len());
-            &body[..end]
+        if let Some(v) = lower.strip_prefix("transfer-encoding:") {
+            if v.contains("chunked") {
+                chunked = true;
+            }
         }
-        None => body,
+    }
+    let raw = &buf[head_end + 4..];
+    let body: Vec<u8> = if chunked {
+        decode_chunked(raw)?
+    } else {
+        match content_length {
+            Some(n) => raw[..n.min(raw.len())].to_vec(),
+            None => raw.to_vec(),
+        }
     };
     Ok(Response {
         status,
-        body: String::from_utf8_lossy(body).into_owned(),
+        body: String::from_utf8_lossy(&body).into_owned(),
     })
+}
+
+/// 解码 HTTP/1.1 chunked 响应体：`<hex size>[;ext]\r\n<data>\r\n ... 0\r\n\r\n`
+fn decode_chunked(mut data: &[u8]) -> Result<Vec<u8>, HttpError> {
+    let mut out = Vec::new();
+    loop {
+        let nl = data
+            .windows(2)
+            .position(|w| w == b"\r\n")
+            .ok_or(HttpError("malformed chunked body (no size line)".into()))?;
+        let size_line = String::from_utf8_lossy(&data[..nl]);
+        // 允许 chunk 扩展（`size;ext=val`）
+        let size_str = size_line.split(';').next().unwrap_or("").trim();
+        let size = usize::from_str_radix(size_str, 16)
+            .map_err(|_| HttpError(format!("bad chunk size: {size_str:?}")))?;
+        data = &data[nl + 2..];
+        if size == 0 {
+            break; // 结束块（尾部 trailers 忽略：Connection: close 场景无影响）
+        }
+        if data.len() < size {
+            return Err(HttpError(format!(
+                "truncated chunk: need {size} bytes, have {}",
+                data.len()
+            )));
+        }
+        out.extend_from_slice(&data[..size]);
+        data = &data[size..];
+        if data.len() >= 2 && &data[..2] == b"\r\n" {
+            data = &data[2..];
+        }
+    }
+    Ok(out)
 }
