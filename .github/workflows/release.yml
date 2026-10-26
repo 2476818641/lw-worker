@@ -52,7 +52,7 @@ jobs:
           docker run --rm -v "$PWD:/work" -w /work \
             messense/rust-musl-cross:${{ matrix.image_tag }} \
             bash -c "export CARGO_TARGET_DIR=/work/target && \
-              rustup toolchain install stable --profile minimal && \
+              rustup toolchain install stable --profile minimal --force --no-self-update && \
               rustup target add ${{ matrix.target }} && \
               cargo +stable build --release --locked --target ${{ matrix.target }} && \
               cp /work/target/${{ matrix.target }}/release/blackout-lw /work/${{ matrix.asset }}"
@@ -91,8 +91,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # mips-musl / mipsel-musl 镜像默认预装 nightly，
-      # 我们显式安装 1.74.0 并只添加对应 target，避免 nightly 漂移。
       - name: Build (docker musl-cross + Rust 1.74)
         run: |
           docker run --rm -v "$PWD:/work" -w /work \
