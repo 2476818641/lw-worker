@@ -15,8 +15,11 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    name: Build ${{ matrix.target }}
+  # ============================================================
+  # 稳定组：最新 stable，覆盖 x86_64 / aarch64 / ARMv7 / ARMv5 / ARMv6
+  # ============================================================
+  build-stable:
+    name: Build ${{ matrix.target }} (stable)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -25,31 +28,34 @@ jobs:
           - target: x86_64-unknown-linux-musl
             asset: lw-worker-x86_64
             image_tag: x86_64-musl
-          - target: armv7-unknown-linux-musleabihf
-            asset: lw-worker-armv7
-            image_tag: armv7-musleabihf
           - target: aarch64-unknown-linux-musl
             asset: lw-worker-aarch64
             image_tag: aarch64-musl
-          - target: mipsel-unknown-linux-musl
-            asset: lw-worker-mipsel
-            image_tag: mipsel-musl
+          - target: armv7-unknown-linux-musleabihf
+            asset: lw-worker-armv7
+            image_tag: armv7-musleabihf
+          # ARMv5TE：向后兼容 ARMv5 / ARMv6 / ARMv7（软浮点）
+          - target: arm-unknown-linux-musleabi
+            asset: lw-worker-armv5
+            image_tag: arm-musleabi
+          # ARMv6 硬浮点：性能更好，要求目标设备有 FPU
+          - target: arm-unknown-linux-musleabihf
+            asset: lw-worker-armv6hf
+            image_tag: arm-musleabihf
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # mipsel-unknown-linux-musl 的预编译 rust-std 只在 1.74 提供。
-      # 用 messense/rust-musl-cross 镜像（内置完整 musl 交叉工具链），
-      # 镜像内 rustup 安装 1.74 后编译——避开 zig 与 rustc 1.74 的 crt/gcc_s 冲突。
-      # CARGO_TARGET_DIR 覆盖 .cargo/config.toml 的 Windows 本机 target-dir
-      # （D:/rust/... 路径含冒号，Linux 容器内 join LD_LIBRARY_PATH 会报错）。
-      - name: Build (docker musl-cross + Rust 1.74)
+      - name: Build (docker musl-cross + latest stable)
         run: |
           docker run --rm -v "$PWD:/work" -w /work \
             messense/rust-musl-cross:${{ matrix.image_tag }} \
-            bash -c "export CARGO_TARGET_DIR=/work/target && rustup toolchain install 1.74.0 --profile minimal --target ${{ matrix.target }} \
-              && cargo +1.74.0 build --release --target ${{ matrix.target }} \
-              && cp /work/target/${{ matrix.target }}/release/blackout-lw /work/${{ matrix.asset }}"
+            bash -c "export CARGO_TARGET_DIR=/work/target && \
+              rustup update stable --profile minimal && \
+              rustup target add ${{ matrix.target }} && \
+              cargo +stable build --release --locked --target ${{ matrix.target }} && \
+              cp /work/target/${{ matrix.target }}/release/blackout-lw /work/${{ matrix.asset }}"
 
       - name: Inspect artifact
         run: |
@@ -63,9 +69,57 @@ jobs:
           path: ${{ matrix.asset }}
           if-no-files-found: error
 
+  # ============================================================
+  # Legacy 组：Rust 1.74，仅用于 MIPS 小端 + MIPS 大端
+  # 两者在 1.75 后失去预编译 std，必须锁 1.74
+  # ============================================================
+  build-legacy:
+    name: Build ${{ matrix.target }} (1.74)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: mipsel-unknown-linux-musl
+            asset: lw-worker-mipsel
+            image_tag: mipsel-musl
+          - target: mips-unknown-linux-musl
+            asset: lw-worker-mips
+            image_tag: mips-musl
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # mips-musl / mipsel-musl 镜像默认预装 nightly，
+      # 我们显式安装 1.74.0 并只添加对应 target，避免 nightly 漂移。
+      - name: Build (docker musl-cross + Rust 1.74)
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work \
+            messense/rust-musl-cross:${{ matrix.image_tag }} \
+            bash -c "export CARGO_TARGET_DIR=/work/target && \
+              rustup toolchain install 1.74.0 --profile minimal --target ${{ matrix.target }} && \
+              cargo +1.74.0 build --release --locked --target ${{ matrix.target }} && \
+              cp /work/target/${{ matrix.target }}/release/blackout-lw /work/${{ matrix.asset }}"
+
+      - name: Inspect artifact
+        run: |
+          ls -lh ${{ matrix.asset }}
+          file ${{ matrix.asset }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
+  # ============================================================
+  # Release：等待稳定组 + Legacy 组全部完成
+  # ============================================================
   release:
     name: Create Release
-    needs: build
+    needs: [build-stable, build-legacy]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
