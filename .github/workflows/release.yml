@@ -52,7 +52,7 @@ jobs:
           docker run --rm -v "$PWD:/work" -w /work \
             messense/rust-musl-cross:${{ matrix.image_tag }} \
             bash -c "export CARGO_TARGET_DIR=/work/target && \
-              rustup update stable --profile minimal && \
+              rustup toolchain install stable --profile minimal && \
               rustup target add ${{ matrix.target }} && \
               cargo +stable build --release --locked --target ${{ matrix.target }} && \
               cp /work/target/${{ matrix.target }}/release/blackout-lw /work/${{ matrix.asset }}"
